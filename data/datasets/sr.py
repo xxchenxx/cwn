@@ -3,7 +3,7 @@ import torch
 import pickle
 
 from data.sr_utils import load_sr_dataset
-from data.utils import compute_clique_complex_with_gudhi, compute_ring_2complex
+# from data.utils import compute_clique_complex_with_gudhi, compute_ring_2complex
 from data.utils import convert_graph_dataset_with_rings, convert_graph_dataset_with_gudhi
 from data.datasets import InMemoryComplexDataset
 from definitions import ROOT_DIR

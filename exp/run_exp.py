@@ -13,8 +13,24 @@ from exp.parser import get_parser, validate_args
 from mp.graph_models import GIN0, GINWithJK
 from mp.models import CIN0, Dummy, SparseCIN, EdgeOrient, EdgeMPNN, MessagePassingAgnostic
 from mp.molec_models import EmbedSparseCIN, OGBEmbedSparseCIN, EmbedSparseCINNoRings, EmbedGIN
+import torch.nn as nn
+import torch.nn.utils.prune as prune
 from mp.ring_exp_models import RingSparseCIN, RingGIN
 
+
+def pruning_model(model, px, conv1=False):
+
+    parameters_to_prune =[]
+    for name,m in model.named_modules():
+        if isinstance(m, nn.Linear):
+            parameters_to_prune.append((m,'weight'))
+    parameters_to_prune = tuple(parameters_to_prune)
+
+    prune.global_unstructured(
+        parameters_to_prune,
+        pruning_method=prune.L1Unstructured,
+        amount=px,
+    )
 
 def main(args):
     """The common training and evaluation script used by all the experiments."""
@@ -312,115 +328,131 @@ def main(args):
     train_curve = []
     train_loss_curve = []
     params = []
-    if not args.untrained:
-        for epoch in range(1, args.epochs + 1):
-
-            # perform one epoch
-            print("=====Epoch {}".format(epoch))
-            print('Training...')
-            epoch_train_curve = train(model, device, train_loader, optimizer, args.task_type)
-            train_loss_curve += epoch_train_curve
-            epoch_train_loss = float(np.mean(epoch_train_curve))
-
-            # evaluate model
-            print('Evaluating...')
-            if epoch == 1 or epoch % args.train_eval_period == 0:
-                train_perf, _ = eval(model, device, train_loader, evaluator, args.task_type)
-            train_curve.append(train_perf)
-            valid_perf, epoch_val_loss = eval(model, device,
-                valid_loader, evaluator, args.task_type)#, dataset[split_idx["valid"]])
-            valid_curve.append(valid_perf)
-
-            if test_loader is not None:
-                test_perf, epoch_test_loss = eval(model, device, test_loader, evaluator,
-                                                  args.task_type)
-            else:
-                test_perf = np.nan
-                epoch_test_loss = np.nan
-            test_curve.append(test_perf)
-
-            print(f'Train: {train_perf:.3f} | Validation: {valid_perf:.3f} | Test: {test_perf:.3f}'
-                  f' | Train Loss {epoch_train_loss:.3f} | Val Loss {epoch_val_loss:.3f}'
-                  f' | Test Loss {epoch_test_loss:.3f}')
-
-            # decay learning rate
-            if scheduler is not None:
-                if args.lr_scheduler == 'ReduceLROnPlateau':
-                    scheduler.step(valid_perf)
-                    # We use a strict inequality here like in the benchmarking GNNs paper code
-                    # https://github.com/graphdeeplearning/benchmarking-gnns/blob/master/main_molecules_graph_regression.py#L217
-                    if args.early_stop and optimizer.param_groups[0]['lr'] < args.lr_scheduler_min:
-                        print("\n!! The minimum learning rate has been reached.")
-                        break
-                else:
-                    scheduler.step()
-
-            i = 0
-            new_params = []
-            if epoch % args.train_eval_period == 0:
-                print("====== Slowly changing params ======= ")
-            for name, param in model.named_parameters():
-                # print(f"Param {name}: {param.data.view(-1)[0]}")
-                # new_params.append(param.data.detach().clone().view(-1)[0])
-                new_params.append(param.data.detach().mean().item())
-                if len(params) > 0 and epoch % args.train_eval_period == 0:
-                    if abs(params[i] - new_params[i]) < 1e-6:
-                        print(f"Param {name}: {params[i] - new_params[i]}")
-                i += 1
-            params = copy.copy(new_params)
-
-        if not args.minimize:
-            best_val_epoch = np.argmax(np.array(valid_curve))
+    for i in range(10):
+        pruning_model(model, 0.2)
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        if args.lr_scheduler == 'ReduceLROnPlateau':
+            mode = 'min' if args.minimize else 'max'
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode=mode,
+                                                                factor=args.lr_scheduler_decay_rate,
+                                                                patience=args.lr_scheduler_patience,
+                                                                verbose=True)
+        elif args.lr_scheduler == 'StepLR':
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_scheduler_decay_steps,
+                                                        gamma=args.lr_scheduler_decay_rate)
+        elif args.lr_scheduler == 'None':
+            scheduler = None
         else:
-            best_val_epoch = np.argmin(np.array(valid_curve))
-    else:
-        train_loss_curve.append(np.nan)
-        train_curve.append(np.nan)
-        valid_curve.append(np.nan)
-        test_curve.append(np.nan)
+            raise NotImplementedError(f'Scheduler {args.lr_scheduler} is not currently supported.')
+        if not args.untrained:
+            for epoch in range(1, args.epochs + 1):
 
-    print('Final Evaluation...')
-    final_train_perf = np.nan
-    final_val_perf = np.nan
-    final_test_perf = np.nan
-    if not args.dataset.startswith('sr'):
-        final_train_perf, _ = eval(model, device, train_loader, evaluator, args.task_type)
-        final_val_perf, _ = eval(model, device, valid_loader, evaluator, args.task_type)
-    if test_loader is not None:
-        final_test_perf, _ = eval(model, device, test_loader, evaluator, args.task_type)
+                # perform one epoch
+                print("=====Epoch {}".format(epoch))
+                print('Training...')
+                epoch_train_curve = train(model, device, train_loader, optimizer, args.task_type)
+                train_loss_curve += epoch_train_curve
+                epoch_train_loss = float(np.mean(epoch_train_curve))
 
-    # save results
-    curves = {
-        'train_loss': train_loss_curve,
-        'train': train_curve,
-        'val': valid_curve,
-        'test': test_curve,
-        'last_val': final_val_perf,
-        'last_test': final_test_perf,
-        'last_train': final_train_perf,
-        'best': best_val_epoch}
+                # evaluate model
+                print('Evaluating...')
+                if epoch == 1 or epoch % args.train_eval_period == 0:
+                    train_perf, _ = eval(model, device, train_loader, evaluator, args.task_type)
+                train_curve.append(train_perf)
+                valid_perf, epoch_val_loss = eval(model, device,
+                    valid_loader, evaluator, args.task_type)#, dataset[split_idx["valid"]])
+                valid_curve.append(valid_perf)
 
-    msg = (
-       f'========== Result ============\n'
-       f'Dataset:        {args.dataset}\n'
-       f'------------ Best epoch -----------\n'
-       f'Train:          {train_curve[best_val_epoch]}\n'
-       f'Validation:     {valid_curve[best_val_epoch]}\n'
-       f'Test:           {test_curve[best_val_epoch]}\n'
-       f'Best epoch:     {best_val_epoch}\n'
-       '------------ Last epoch -----------\n'
-       f'Train:          {final_train_perf}\n'
-       f'Validation:     {final_val_perf}\n'
-       f'Test:           {final_test_perf}\n'
-       '-------------------------------\n\n')
-    print(msg)
+                if test_loader is not None:
+                    test_perf, epoch_test_loss = eval(model, device, test_loader, evaluator,
+                                                    args.task_type)
+                else:
+                    test_perf = np.nan
+                    epoch_test_loss = np.nan
+                test_curve.append(test_perf)
 
-    msg += str(args)
-    with open(filename, 'w') as handle:
-        handle.write(msg)
-    if args.dump_curves:
-        with open(os.path.join(result_folder, 'curves.pkl'), 'wb') as handle:
-            pickle.dump(curves, handle)
+                print(f'Train: {train_perf:.3f} | Validation: {valid_perf:.3f} | Test: {test_perf:.3f}'
+                    f' | Train Loss {epoch_train_loss:.3f} | Val Loss {epoch_val_loss:.3f}'
+                    f' | Test Loss {epoch_test_loss:.3f}')
+
+                # decay learning rate
+                if scheduler is not None:
+                    if args.lr_scheduler == 'ReduceLROnPlateau':
+                        scheduler.step(valid_perf)
+                        # We use a strict inequality here like in the benchmarking GNNs paper code
+                        # https://github.com/graphdeeplearning/benchmarking-gnns/blob/master/main_molecules_graph_regression.py#L217
+                        if args.early_stop and optimizer.param_groups[0]['lr'] < args.lr_scheduler_min:
+                            print("\n!! The minimum learning rate has been reached.")
+                            break
+                    else:
+                        scheduler.step()
+
+                i = 0
+                new_params = []
+                if epoch % args.train_eval_period == 0:
+                    print("====== Slowly changing params ======= ")
+                for name, param in model.named_parameters():
+                    # print(f"Param {name}: {param.data.view(-1)[0]}")
+                    # new_params.append(param.data.detach().clone().view(-1)[0])
+                    new_params.append(param.data.detach().mean().item())
+                    if len(params) > 0 and epoch % args.train_eval_period == 0:
+                        if abs(params[i] - new_params[i]) < 1e-6:
+                            print(f"Param {name}: {params[i] - new_params[i]}")
+                    i += 1
+                params = copy.copy(new_params)
+
+            if not args.minimize:
+                best_val_epoch = np.argmax(np.array(valid_curve))
+            else:
+                best_val_epoch = np.argmin(np.array(valid_curve))
+        else:
+            train_loss_curve.append(np.nan)
+            train_curve.append(np.nan)
+            valid_curve.append(np.nan)
+            test_curve.append(np.nan)
+
+        print('Final Evaluation...')
+        final_train_perf = np.nan
+        final_val_perf = np.nan
+        final_test_perf = np.nan
+        if not args.dataset.startswith('sr'):
+            final_train_perf, _ = eval(model, device, train_loader, evaluator, args.task_type)
+            final_val_perf, _ = eval(model, device, valid_loader, evaluator, args.task_type)
+        if test_loader is not None:
+            final_test_perf, _ = eval(model, device, test_loader, evaluator, args.task_type)
+
+        # save results
+        curves = {
+            'train_loss': train_loss_curve,
+            'train': train_curve,
+            'val': valid_curve,
+            'test': test_curve,
+            'last_val': final_val_perf,
+            'last_test': final_test_perf,
+            'last_train': final_train_perf,
+            'best': best_val_epoch}
+
+        msg = (
+        f'========== Result ============\n'
+        f'Dataset:        {args.dataset}\n'
+        f'------------ Best epoch -----------\n'
+        f'Train:          {train_curve[best_val_epoch]}\n'
+        f'Validation:     {valid_curve[best_val_epoch]}\n'
+        f'Test:           {test_curve[best_val_epoch]}\n'
+        f'Best epoch:     {best_val_epoch}\n'
+        '------------ Last epoch -----------\n'
+        f'Train:          {final_train_perf}\n'
+        f'Validation:     {final_val_perf}\n'
+        f'Test:           {final_test_perf}\n'
+        '-------------------------------\n\n')
+        print(msg)
+
+        msg += str(args)
+        with open(filename, 'w') as handle:
+            handle.write(msg)
+        if args.dump_curves:
+            with open(os.path.join(result_folder, 'curves.pkl'), 'wb') as handle:
+                pickle.dump(curves, handle)
 
     return curves
 

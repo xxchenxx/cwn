@@ -1,11 +1,11 @@
 import numpy as np
-import torch
 import gudhi as gd
 import itertools
 import graph_tool as gt
 import graph_tool.topology as top
 import networkx as nx
 
+import torch
 from tqdm import tqdm
 from data.complex import Cochain, Complex
 from typing import List, Dict, Optional, Union

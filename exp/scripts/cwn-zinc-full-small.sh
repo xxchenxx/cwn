@@ -7,7 +7,7 @@ python -m exp.run_mol_exp \
   --exp_name cwn-zinc-full-small \
   --dataset ZINC-FULL \
   --train_eval_period 25 \
-  --epochs 150 \
+  --epochs 100 \
   --batch_size 128 \
   --drop_rate 0.0 \
   --drop_position lin2 \

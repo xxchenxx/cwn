@@ -3,7 +3,7 @@ import os
 import copy
 import numpy as np
 import subprocess
-
+import graph_tool
 from exp.parser import get_parser
 from exp.run_exp import main
 from itertools import product
